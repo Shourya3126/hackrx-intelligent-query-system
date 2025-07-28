@@ -10,7 +10,7 @@ python-docx==1.1.0
 requests==2.31.0
 sentence-transformers==2.2.2
 huggingface_hub==0.16.4
-torch==2.5.0+cpu  # ✅ Updated to available version
+torch==2.5.0 # ✅ Updated to available version
 transformers==4.35.2
 numpy==1.24.4
 faiss-cpu==1.7.4
