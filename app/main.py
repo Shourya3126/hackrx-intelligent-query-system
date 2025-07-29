@@ -1,77 +1,50 @@
-
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.middleware.cors import CORSMiddleware
 import time
 import logging
 from typing import List
 
-from app.models.schemas import QueryRequest, QueryResponse
-from app.services.document_processor import DocumentProcessor  
-from app.services.embedding_service import EmbeddingService
-from app.services.vector_store import VectorStore
-from app.services.llm_service import LLMService
-from app.config import settings
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-import time
-import logging
-from typing import List
 
 from app.models.schemas import QueryRequest, QueryResponse
-from app.services.document_processor import DocumentProcessor  
+from app.services.document_processor import DocumentProcessor
 from app.services.embedding_service import EmbeddingService
 from app.services.vector_store import VectorStore
 from app.services.llm_service import LLMService
 from app.config import settings
 
-# Test configuration loading (you can remove these after testing)
-print("🔧 Configuration loaded successfully:")
-print(f"OPENROUTER_MODEL: {settings.OPENROUTER_MODEL}")  
-print(f"CHUNK_SIZE: {settings.CHUNK_SIZE}")
-print(f"USE_FAISS: {settings.USE_FAISS}")
-print(f"REQUEST_TIMEOUT: {settings.REQUEST_TIMEOUT}")
-print("-" * 50)
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Initialize FastAPI
+# Initialize FastAPI app
 app = FastAPI(
     title="HackRx Intelligent Query-Retrieval System",
-    description="LLM-powered document Q&A system for insurance, legal, HR, and compliance",
-    version="1.0.0"
+    description="LLM-powered document Q&A system for insurance policies and compliance",
+    version="1.0.0",
 )
 
-# CORS middleware
+# Add CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # For production, specify allowed origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Security
+# Security scheme
 security = HTTPBearer()
 
-# Global service instances
+# Initialize your services as global variables (or via dependency injection if preferred)
 document_processor = DocumentProcessor(settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
 embedding_service = EmbeddingService()
 vector_store = VectorStore()
 llm_service = LLMService()
 
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Verify API token"""
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Verify bearer token for API access."""
     if credentials.credentials != settings.API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -80,63 +53,85 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
         )
     return credentials.credentials
 
+
 @app.get("/")
 async def root():
+    """Root endpoint with basic info."""
     return {"message": "HackRx Intelligent Query-Retrieval System", "status": "active"}
+
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": time.time()}
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "app_name": "HackRx Intelligent Query-Retrieval System",
+        "version": "1.0.0",
+        "openrouter_configured": bool(settings.OPENROUTER_API_KEY),
+        "model": settings.OPENROUTER_MODEL,
+    }
+
 
 @app.post("/api/v1/hackrx/run", response_model=QueryResponse)
-
-async def process_queries(
+async def process_queries_v1(
     request: QueryRequest,
-    token: str = Depends(verify_token)
+    token: str = Depends(verify_token),
 ) -> QueryResponse:
-    """Main endpoint for processing document queries"""
+    """Versioned endpoint to process queries."""
+    return await _process_queries(request)
+
+
+@app.post("/hackrx/run", response_model=QueryResponse)
+async def process_queries_hackrx(
+    request: QueryRequest,
+    token: str = Depends(verify_token),
+) -> QueryResponse:
+    """Official HackRx competition endpoint."""
+    return await _process_queries(request)
+
+
+async def _process_queries(request: QueryRequest) -> QueryResponse:
     start_time = time.time()
-    
     try:
         logger.info(f"Processing {len(request.questions)} questions for document: {request.documents}")
-        
-        # Step 1: Process document
+
+        # Step 1: Download and process the document into chunks
         chunks = await document_processor.process_document_from_url(request.documents)
-        
-        # Step 2: Generate embeddings for document chunks
+
+        # Step 2: Generate embeddings for the document chunks
         chunk_texts = [chunk["text"] for chunk in chunks]
         chunk_embeddings = await embedding_service.get_embeddings(chunk_texts)
-        
-        # Step 3: Store in vector database
+
+        # Step 3: Store embeddings in vector store
         await vector_store.store_documents(chunks, chunk_embeddings)
-        
-        # Step 4: Process each question
+
+        # Step 4: Generate embeddings for questions
         question_embeddings = await embedding_service.get_embeddings(request.questions)
-        
+
+        # Step 5: Retrieve relevant contexts for each question
         contexts = []
-        for question_embedding in question_embeddings:
-            # Retrieve relevant contexts
-            relevant_chunks = await vector_store.search(
-                question_embedding, 
-                top_k=settings.MAX_CHUNKS_FOR_CONTEXT
-            )
+        for q_emb in question_embeddings:
+            relevant_chunks = await vector_store.search(q_emb, top_k=settings.MAX_CHUNKS_FOR_CONTEXT)
             contexts.append(relevant_chunks)
-        
-        # Step 5: Generate answers using LLM
+
+        # Step 6: Generate answers using the language model
         answers = await llm_service.generate_answers(request.questions, contexts)
-        
-        processing_time = time.time() - start_time
-        logger.info(f"Completed processing in {processing_time:.2f} seconds")
-        
+
+        elapsed = time.time() - start_time
+        logger.info(f"Completed processing in {elapsed:.2f} seconds")
+
         return QueryResponse(answers=answers)
-        
+
     except Exception as e:
         logger.error(f"Error processing queries: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing queries: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error processing queries: {str(e)}")
+
 
 if __name__ == "__main__":
+    import os
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # Use PORT env variable if set, fallback to 8000
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Starting app on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)
